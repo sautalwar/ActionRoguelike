@@ -1,0 +1,129 @@
+# yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
+# =============================================================================
+# EA Training Workshop — UE5 Game Development Environment Setup
+# =============================================================================
+# Run with:  winget configure -f .\configuration.winget
+#
+# This WinGet DSC configuration installs all tools needed for the EA training
+# workshop (Segment 1: Environment Setup). One command, zero manual clicks.
+# =============================================================================
+
+properties:
+  configurationVersion: 0.2.0
+  resources:
+
+    # -------------------------------------------------------------------------
+    # Core IDE & Build Tools
+    # -------------------------------------------------------------------------
+
+    # Visual Studio 2022 Community — primary C++ IDE for UE5 development.
+    # Includes the "Game development with C++" workload for Unreal Engine
+    # compilation, debugging, and profiling.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Visual Studio 2022 Community with C++ Game Dev workload
+        allowPrerelease: true
+      settings:
+        id: Microsoft.VisualStudio.2022.Community
+        source: winget
+
+    # Visual Studio 2022 Enterprise — used alongside Community for advanced
+    # profiling, IntelliTrace, and enterprise-grade diagnostics during the
+    # training. Substitute for VS 2026 Preview until it ships to WinGet.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Visual Studio 2022 Enterprise (stand-in for VS 2026 Preview)
+        allowPrerelease: true
+      settings:
+        id: Microsoft.VisualStudio.2022.Enterprise
+        source: winget
+
+    # -------------------------------------------------------------------------
+    # Game Engine
+    # -------------------------------------------------------------------------
+
+    # Epic Games Launcher — required to install and manage Unreal Engine 5.
+    # After installation, open the launcher and install UE 5.x from the Library.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Epic Games Launcher (for Unreal Engine 5)
+        allowPrerelease: true
+      settings:
+        id: EpicGames.EpicGamesLauncher
+        source: winget
+
+    # -------------------------------------------------------------------------
+    # Version Control
+    # -------------------------------------------------------------------------
+
+    # Git — distributed version control used for workshop repos, config files,
+    # and Copilot CLI context. Also required by UE5 GitSourceControl plugin.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Git for version control
+        allowPrerelease: true
+      settings:
+        id: Git.Git
+        source: winget
+
+    # -------------------------------------------------------------------------
+    # Terminal & Productivity
+    # -------------------------------------------------------------------------
+
+    # Windows Terminal — modern terminal for running winget, Copilot CLI,
+    # and MCP servers side-by-side in tabbed/split panes.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Windows Terminal
+        allowPrerelease: true
+      settings:
+        id: Microsoft.WindowsTerminal
+        source: winget
+
+    # PowerToys — FancyZones for multi-monitor layouts, Always On Top for
+    # keeping reference docs visible during live coding sessions.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install PowerToys (window management & productivity)
+        allowPrerelease: true
+      settings:
+        id: Microsoft.PowerToys
+        source: winget
+
+    # -------------------------------------------------------------------------
+    # MCP Server Runtimes
+    # -------------------------------------------------------------------------
+
+    # Python 3.12 — runtime for MCP servers such as mcp-atlassian (Jira/
+    # Confluence integration) and custom automation scripts.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Python 3.12 (MCP server runtime, e.g. mcp-atlassian)
+        allowPrerelease: true
+      settings:
+        id: Python.Python.3.12
+        source: winget
+
+    # Node.js LTS — runtime for MCP servers such as p4mcp-server (Perforce
+    # integration) and other JS/TS-based tooling.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Node.js LTS (MCP server runtime, e.g. p4mcp-server)
+        allowPrerelease: true
+      settings:
+        id: OpenJS.NodeJS.LTS
+        source: winget
+
+    # -------------------------------------------------------------------------
+    # Secondary Editor
+    # -------------------------------------------------------------------------
+
+    # VS Code — lightweight editor for JSON/YAML config files, MCP server
+    # configs, and quick edits outside the full Visual Studio IDE.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      directives:
+        description: Install Visual Studio Code (config editing, secondary IDE)
+        allowPrerelease: true
+      settings:
+        id: Microsoft.VisualStudioCode
+        source: winget

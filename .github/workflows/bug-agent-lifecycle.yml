@@ -1,0 +1,617 @@
+# =============================================================================
+# Bug Agent Lifecycle Workflow
+# =============================================================================
+#
+# This workflow demonstrates the full lifecycle of a Copilot coding agent
+# tied to bug tickets. Think of it as "Agent as a Service" — agents are
+# ephemeral workers that are born, work, die, and can be resurrected.
+#
+#   🐣 BIRTH       — An issue is assigned to 'copilot' → agent + prompt created
+#   🔧 ACTIVE      — The agent works using its prompt file for context
+#   💀 DEATH       — The issue is closed → agent destroyed, prompt archived
+#   🧟 RESURRECTION — The issue is reopened → agent recreated from archived prompt
+#
+# Key files produced:
+#   .github/prompts/bugs/GAME-<NUM>.prompt.md  — persistent context (survives death)
+#   .github/agents/GAME-<NUM>-agent.agent.md   — ephemeral agent definition
+#
+# =============================================================================
+
+name: "🤖 Bug Agent Lifecycle"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS: We listen to three issue event types to drive the lifecycle.
+# Each job below uses `if:` conditions to run only on the relevant event.
+# ---------------------------------------------------------------------------
+on:
+  issues:
+    types:
+      - assigned   # 🐣 Birth  — someone assigned the issue
+      - closed     # 💀 Death  — the issue was closed / resolved
+      - reopened   # 🧟 Resurrection — the issue was reopened
+
+# Ensure only one workflow runs per issue at a time to avoid race conditions
+concurrency:
+  group: bug-agent-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: read
+
+jobs:
+  # ===========================================================================
+  # JOB 1: CREATE-AGENT  (🐣 Birth)
+  # ===========================================================================
+  # Triggers when an issue is assigned AND the assignee contains 'copilot'.
+  # Creates two files:
+  #   1. A prompt file with full bug context for the agent
+  #   2. An agent definition file that references the prompt
+  # ===========================================================================
+  create-agent:
+    name: "🐣 Birth — Create Bug Agent"
+    runs-on: ubuntu-latest
+
+    # Only run when:
+    #   - The event is an assignment (not close/reopen)
+    #   - The assignee's login contains 'copilot' (case-insensitive)
+    if: >-
+      github.event.action == 'assigned' &&
+      contains(github.event.assignee.login, 'copilot')
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Check out the repository so we can add files
+      # -----------------------------------------------------------------------
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 2: Extract issue metadata from the GitHub event payload
+      # We pull out the issue number, title, body, and scan for linked issues
+      # (references like #123 in the issue body).
+      # -----------------------------------------------------------------------
+      - name: "🔍 Extract issue metadata"
+        id: extract
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS: ${{ join(github.event.issue.labels.*.name, ', ') }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          echo "📋 Processing issue #${ISSUE_NUM}: ${ISSUE_TITLE}"
+
+          # --- Scan for linked issues (e.g., #42, #108) in the body ---
+          # This lets agents understand related bugs and share context
+          LINKED_ISSUES=""
+          if [ -n "$ISSUE_BODY" ]; then
+            # Extract all #NNN references, excluding the current issue
+            LINKED_ISSUES=$(echo "$ISSUE_BODY" | grep -oP '#\d+' | grep -v "#${ISSUE_NUM}" | sort -u | tr '\n' ' ' || true)
+          fi
+
+          echo "🔗 Linked issues found: ${LINKED_ISSUES:-none}"
+
+          # Export to subsequent steps
+          echo "linked_issues=${LINKED_ISSUES}" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Step 3: Create the prompt file
+      # This is the agent's "memory" — it contains all the context about the
+      # bug. The prompt file SURVIVES agent death so it can be reused if the
+      # issue is reopened (resurrection).
+      # -----------------------------------------------------------------------
+      - name: "📝 Create prompt file"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS: ${{ join(github.event.issue.labels.*.name, ', ') }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          LINKED_ISSUES: ${{ steps.extract.outputs.linked_issues }}
+        run: |
+          # Ensure the prompts directory exists
+          mkdir -p .github/prompts/bugs
+
+          PROMPT_FILE=".github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md"
+          echo "📄 Creating prompt file: ${PROMPT_FILE}"
+
+          # --- Build the related bugs section ---
+          RELATED_SECTION=""
+          if [ -n "$LINKED_ISSUES" ]; then
+            RELATED_SECTION="## Related Bugs\n\nThis bug references other issues. Review them for shared context:\n"
+            for issue_ref in $LINKED_ISSUES; do
+              # Strip the '#' prefix to get the number
+              num="${issue_ref#\#}"
+              RELATED_SECTION="${RELATED_SECTION}\n- ${issue_ref} → \`#prompt:bugs/GAME-${num}\`"
+            done
+            RELATED_SECTION="${RELATED_SECTION}\n"
+          fi
+
+          # --- Write the prompt file ---
+          cat > "$PROMPT_FILE" << 'PROMPT_HEADER'
+          ---
+          PROMPT_HEADER
+
+          # Write proper YAML frontmatter (can't use heredoc with variables easily)
+          cat > "$PROMPT_FILE" << EOF
+          ---
+          description: "Bug context for GAME-${ISSUE_NUM}: ${ISSUE_TITLE}"
+          ---
+
+          # 🐛 GAME-${ISSUE_NUM}: ${ISSUE_TITLE}
+
+          ## Status: 🟢 Active
+
+          ## Bug Context
+
+          | Field        | Value                          |
+          |--------------|--------------------------------|
+          | Issue        | #${ISSUE_NUM}                  |
+          | Title        | ${ISSUE_TITLE}                 |
+          | Author       | @${ISSUE_AUTHOR}               |
+          | Labels       | ${ISSUE_LABELS:-none}          |
+          | Created      | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          ## Description
+
+          ${ISSUE_BODY:-_No description provided._}
+
+          $(echo -e "$RELATED_SECTION")
+
+          ## Investigation Notes
+
+          _Agent will populate this section as it investigates the bug._
+
+          ## Fix Strategy
+
+          _Agent will document its approach here before making changes._
+          EOF
+
+          # Clean up leading whitespace from heredoc indentation
+          sed -i 's/^          //' "$PROMPT_FILE"
+
+          echo "✅ Prompt file created"
+          cat "$PROMPT_FILE"
+
+      # -----------------------------------------------------------------------
+      # Step 4: Create the agent definition file
+      # This is the agent's "identity" — it defines what tools the agent can
+      # use and how it should behave. This file is DESTROYED when the issue
+      # is closed (agent death) but can be recreated (resurrection).
+      # -----------------------------------------------------------------------
+      - name: "🤖 Create agent definition file"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          LINKED_ISSUES: ${{ steps.extract.outputs.linked_issues }}
+        run: |
+          # Ensure the agents directory exists
+          mkdir -p .github/agents
+
+          AGENT_FILE=".github/agents/GAME-${ISSUE_NUM}-agent.agent.md"
+          echo "🤖 Creating agent file: ${AGENT_FILE}"
+
+          # --- Build linked prompt references ---
+          LINKED_PROMPTS=""
+          if [ -n "$LINKED_ISSUES" ]; then
+            LINKED_PROMPTS="\n### Related Bug Prompts\n\nThis bug is linked to other issues. Review their prompts for shared context:\n"
+            for issue_ref in $LINKED_ISSUES; do
+              num="${issue_ref#\#}"
+              LINKED_PROMPTS="${LINKED_PROMPTS}\n- Read \`.github/prompts/bugs/GAME-${num}.prompt.md\` for context on ${issue_ref}"
+            done
+          fi
+
+          # --- Write the agent definition ---
+          cat > "$AGENT_FILE" << EOF
+          ---
+          name: "GAME-${ISSUE_NUM} Bug Agent"
+          description: "Autonomous agent for fixing bug GAME-${ISSUE_NUM}: ${ISSUE_TITLE}"
+          tools:
+            - code_search
+            - readfile
+            - editfiles
+            - find_references
+            - runcommandinterminal
+          ---
+
+          # 🤖 GAME-${ISSUE_NUM} Bug Agent
+
+          You are an autonomous bug-fixing agent assigned to **GAME-${ISSUE_NUM}**.
+
+          ## Primary Directive
+
+          Read your bug context from:
+          \`\`\`
+          .github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md
+          \`\`\`
+
+          Then follow the project-wide instructions in:
+          \`\`\`
+          .github/copilot-instructions.md
+          \`\`\`
+
+          ## Workflow
+
+          1. **Understand** — Read the prompt file to understand the bug
+          2. **Investigate** — Use \`code_search\` and \`find_references\` to locate relevant code
+          3. **Plan** — Document your fix strategy in the prompt file
+          4. **Fix** — Make minimal, targeted changes using \`editfiles\`
+          5. **Verify** — Run tests with \`runcommandinterminal\` to confirm the fix
+
+          ## Context Management Rules
+
+          To stay focused and avoid context overload, follow these limits:
+
+          - **Max 10 files open** — Only keep the most relevant files in context.
+            Close files you no longer need before opening new ones.
+          - **Max 3 related bugs** — If more than 3 bugs are linked, prioritize
+            the ones most likely to share root cause.
+          - **Verify APIs** — Before using any function or method, run
+            \`find_references\` to confirm it exists and check its current signature.
+            Do not assume APIs haven't changed.
+          - **Stay scoped** — Only modify files directly related to this bug.
+            If you discover a separate issue, note it but do not fix it.
+          $(echo -e "$LINKED_PROMPTS")
+
+          ## Completion
+
+          When the fix is ready:
+          1. Update the prompt file with investigation notes and fix details
+          2. Create a pull request referencing issue #${ISSUE_NUM}
+          3. Request review from the issue author
+          EOF
+
+          # Clean up leading whitespace from heredoc indentation
+          sed -i 's/^          //' "$AGENT_FILE"
+
+          echo "✅ Agent file created"
+          cat "$AGENT_FILE"
+
+      # -----------------------------------------------------------------------
+      # Step 5: Commit and push both files to the repository
+      # The agent is now "alive" — Copilot can discover and use these files
+      # -----------------------------------------------------------------------
+      - name: "🚀 Commit and push agent files"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .github/prompts/bugs/ .github/agents/
+          git commit -m "🐣 Birth: Create agent for GAME-${ISSUE_NUM}
+
+          Spawned bug agent for: ${ISSUE_TITLE}
+
+          Files created:
+          - .github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md (bug context)
+          - .github/agents/GAME-${ISSUE_NUM}-agent.agent.md (agent definition)
+
+          Triggered by: issue #${ISSUE_NUM} assigned to copilot"
+
+          git push
+
+          echo "🎉 Agent GAME-${ISSUE_NUM} is now ALIVE!"
+
+  # ===========================================================================
+  # JOB 2: CLEANUP-AGENT  (💀 Death)
+  # ===========================================================================
+  # Triggers when an issue is closed.
+  # Destroys the agent file but PRESERVES the prompt file (archiving it).
+  # This means the bug's history is retained even after the agent dies.
+  # ===========================================================================
+  cleanup-agent:
+    name: "💀 Death — Cleanup Bug Agent"
+    runs-on: ubuntu-latest
+
+    # Only run when the issue is closed
+    if: github.event.action == 'closed'
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Check out the repository
+      # -----------------------------------------------------------------------
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 2: Remove the agent definition file
+      # The agent is "dead" — it can no longer be discovered or invoked.
+      # We keep the prompt file as an archive of the bug's history.
+      # -----------------------------------------------------------------------
+      - name: "🗑️ Remove agent definition (but keep prompt)"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+        run: |
+          AGENT_FILE=".github/agents/GAME-${ISSUE_NUM}-agent.agent.md"
+
+          if [ -f "$AGENT_FILE" ]; then
+            echo "💀 Removing agent file: ${AGENT_FILE}"
+            rm "$AGENT_FILE"
+            echo "✅ Agent file removed"
+          else
+            echo "⚠️ Agent file not found (may have been manually removed): ${AGENT_FILE}"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 3: Update the prompt file to mark it as resolved
+      # The prompt transitions from Active → Resolved, and we append a
+      # summary section noting when and how the issue was closed.
+      # -----------------------------------------------------------------------
+      - name: "📝 Archive prompt file (Active → Resolved)"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          CLOSED_BY: ${{ github.event.sender.login }}
+        run: |
+          PROMPT_FILE=".github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md"
+
+          if [ -f "$PROMPT_FILE" ]; then
+            echo "📝 Updating prompt file status: Active → Resolved"
+
+            # Update status from Active to Resolved
+            sed -i 's/## Status: 🟢 Active/## Status: 🔴 Resolved/' "$PROMPT_FILE"
+
+            # Append a fix summary section at the end of the file
+            cat >> "$PROMPT_FILE" << EOF
+
+          ## Fix Summary
+
+          | Field       | Value                             |
+          |-------------|-----------------------------------|
+          | Status      | ✅ Resolved                       |
+          | Closed by   | @${CLOSED_BY}                     |
+          | Closed at   | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          _Issue #${ISSUE_NUM} has been closed. The agent has been decommissioned._
+          _The prompt file is preserved as a historical record of this bug._
+          EOF
+
+            # Clean up leading whitespace from heredoc indentation
+            sed -i 's/^          //' "$PROMPT_FILE"
+
+            echo "✅ Prompt file archived"
+            cat "$PROMPT_FILE"
+          else
+            echo "⚠️ Prompt file not found: ${PROMPT_FILE}"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 4: Commit and push the changes
+      # -----------------------------------------------------------------------
+      - name: "🚀 Commit and push cleanup"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A .github/agents/ .github/prompts/bugs/
+          git commit -m "💀 Death: Decommission agent for GAME-${ISSUE_NUM}
+
+          Agent destroyed for: ${ISSUE_TITLE}
+
+          Changes:
+          - Removed .github/agents/GAME-${ISSUE_NUM}-agent.agent.md (agent destroyed)
+          - Updated .github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md (status → Resolved)
+
+          Triggered by: issue #${ISSUE_NUM} closed" || echo "Nothing to commit"
+
+          git push
+
+          echo "⚰️ Agent GAME-${ISSUE_NUM} has been decommissioned. Rest in peace."
+
+  # ===========================================================================
+  # JOB 3: RESURRECT-AGENT  (🧟 Resurrection)
+  # ===========================================================================
+  # Triggers when a closed issue is reopened.
+  # Recreates the agent from the archived prompt file, preserving all the
+  # historical context from the previous investigation.
+  # ===========================================================================
+  resurrect-agent:
+    name: "🧟 Resurrection — Revive Bug Agent"
+    runs-on: ubuntu-latest
+
+    # Only run when the issue is reopened
+    if: github.event.action == 'reopened'
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Check out the repository
+      # -----------------------------------------------------------------------
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 2: Update the prompt file status from Resolved → Reopened
+      # We also add a note about the resurrection so the agent knows
+      # this bug has prior history.
+      # -----------------------------------------------------------------------
+      - name: "📝 Update prompt file (Resolved → Reopened)"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          REOPENED_BY: ${{ github.event.sender.login }}
+        run: |
+          PROMPT_FILE=".github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md"
+
+          if [ -f "$PROMPT_FILE" ]; then
+            echo "📝 Updating prompt file status: Resolved → Reopened"
+
+            # Update status from Resolved to Reopened
+            sed -i 's/## Status: 🔴 Resolved/## Status: 🟡 Reopened/' "$PROMPT_FILE"
+
+            # Add a resurrection note
+            cat >> "$PROMPT_FILE" << EOF
+
+          ## ⚠️ Resurrection Notice
+
+          | Field       | Value                             |
+          |-------------|-----------------------------------|
+          | Status      | 🧟 Resurrected                   |
+          | Reopened by | @${REOPENED_BY}                   |
+          | Reopened at | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          **This is a resurrected agent.** The previous fix was insufficient or
+          the bug has regressed. Review the Fix Summary above for what was tried
+          before, and investigate what changed since the original fix.
+
+          ### Resurrection Checklist
+          - [ ] Review the previous Fix Summary for context
+          - [ ] Check if the original fix was reverted or overwritten
+          - [ ] Look for new code changes that may have caused regression
+          - [ ] Verify the original test cases still pass
+          EOF
+
+            # Clean up leading whitespace from heredoc indentation
+            sed -i 's/^          //' "$PROMPT_FILE"
+
+            echo "✅ Prompt file updated for resurrection"
+          else
+            echo "⚠️ No archived prompt found — creating fresh prompt"
+            # If no prompt exists (edge case), we note that history is missing
+            mkdir -p .github/prompts/bugs
+            cat > "$PROMPT_FILE" << EOF
+          ---
+          description: "Bug context for GAME-${ISSUE_NUM}: ${{ github.event.issue.title }}"
+          ---
+
+          # 🐛 GAME-${ISSUE_NUM}: ${{ github.event.issue.title }}
+
+          ## Status: 🟡 Reopened
+
+          > ⚠️ This agent was resurrected but no prior prompt file was found.
+          > Historical context from the previous investigation is unavailable.
+
+          ## Bug Context
+
+          | Field        | Value                          |
+          |--------------|--------------------------------|
+          | Issue        | #${ISSUE_NUM}                  |
+          | Title        | ${{ github.event.issue.title }}|
+          | Reopened by  | @${REOPENED_BY}                |
+          | Reopened at  | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          ## Description
+
+          ${{ github.event.issue.body }}
+          EOF
+
+            sed -i 's/^          //' "$PROMPT_FILE"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 3: Re-create the agent definition file
+      # The agent is "reborn" with the same tools and rules, but now it has
+      # access to the full history from the previous investigation.
+      # -----------------------------------------------------------------------
+      - name: "🤖 Re-create agent definition"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          mkdir -p .github/agents
+
+          AGENT_FILE=".github/agents/GAME-${ISSUE_NUM}-agent.agent.md"
+          echo "🧟 Resurrecting agent: ${AGENT_FILE}"
+
+          cat > "$AGENT_FILE" << EOF
+          ---
+          name: "GAME-${ISSUE_NUM} Bug Agent (Resurrected)"
+          description: "Resurrected agent for bug GAME-${ISSUE_NUM}: ${ISSUE_TITLE}"
+          tools:
+            - code_search
+            - readfile
+            - editfiles
+            - find_references
+            - runcommandinterminal
+          ---
+
+          # 🧟 GAME-${ISSUE_NUM} Bug Agent (Resurrected)
+
+          You are a **resurrected** bug-fixing agent for **GAME-${ISSUE_NUM}**.
+          A previous agent worked on this bug but the fix was insufficient.
+
+          ## Primary Directive
+
+          Read your bug context (including previous investigation history) from:
+          \`\`\`
+          .github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md
+          \`\`\`
+
+          Then follow the project-wide instructions in:
+          \`\`\`
+          .github/copilot-instructions.md
+          \`\`\`
+
+          ## ⚠️ Resurrection Protocol
+
+          Because this bug was previously "fixed" and has returned, you MUST:
+
+          1. **Review History** — Read the entire prompt file, especially the
+             Fix Summary and any investigation notes from the previous agent
+          2. **Understand Regression** — Determine why the previous fix failed:
+             - Was it reverted? Check git log.
+             - Was it incomplete? Check if edge cases were missed.
+             - Was it overwritten? Check recent commits to the affected files.
+          3. **Investigate Fresh** — Use \`code_search\` and \`find_references\`
+             to examine the current state of the code
+          4. **Fix Thoroughly** — Address the root cause, not just the symptom
+          5. **Add Regression Tests** — Ensure this bug cannot return again
+
+          ## Context Management Rules
+
+          - **Max 10 files open** — Only keep the most relevant files in context
+          - **Max 3 related bugs** — Prioritize bugs sharing root cause
+          - **Verify APIs** — Use \`find_references\` before calling any function
+          - **Stay scoped** — Only modify files directly related to this bug
+
+          ## Completion
+
+          When the fix is ready:
+          1. Update the prompt file with new investigation notes
+          2. Create a pull request referencing issue #${ISSUE_NUM}
+          3. Explicitly note this is a re-fix in the PR description
+          4. Add regression tests to prevent future resurrection
+          EOF
+
+          # Clean up leading whitespace from heredoc indentation
+          sed -i 's/^          //' "$AGENT_FILE"
+
+          echo "✅ Agent resurrected"
+          cat "$AGENT_FILE"
+
+      # -----------------------------------------------------------------------
+      # Step 4: Commit and push the resurrected agent
+      # -----------------------------------------------------------------------
+      - name: "🚀 Commit and push resurrected agent"
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .github/agents/ .github/prompts/bugs/
+          git commit -m "🧟 Resurrection: Revive agent for GAME-${ISSUE_NUM}
+
+          Agent resurrected for: ${ISSUE_TITLE}
+
+          Changes:
+          - Re-created .github/agents/GAME-${ISSUE_NUM}-agent.agent.md
+          - Updated .github/prompts/bugs/GAME-${ISSUE_NUM}.prompt.md (status → Reopened)
+
+          The previous fix was insufficient. Agent has access to full history.
+
+          Triggered by: issue #${ISSUE_NUM} reopened"
+
+          git push
+
+          echo "🧟 Agent GAME-${ISSUE_NUM} has risen from the dead!"

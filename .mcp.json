@@ -1,0 +1,35 @@
+{
+  "servers": {
+    "jira": {
+      "command": "uvx",
+      "args": [
+        "mcp-atlassian",
+        "--jira-url", "https://saurabhtalwar.atlassian.net"
+      ],
+      "env": {
+        "JIRA_USERNAME": "${input:jira_email}",
+        "JIRA_API_TOKEN": "${input:jira_token}"
+      }
+    },
+
+    "_perforce_NOTE": "Perforce MCP is disabled (no live P4 server). See scripts/mock-perforce/README.md for mock setup. To enable, uncomment the block below and set your P4 credentials.",
+    "_perforce_disabled": {
+      "command": "npx",
+      "args": ["-y", "p4mcp-server"],
+      "env": {
+        "P4PORT": "ssl:your-p4-server:1666",
+        "P4USER": "your-username",
+        "P4PASSWD": "your-password",
+        "P4CLIENT": "your-workspace"
+      }
+    },
+
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/github-mcp-server"],
+      "env": {
+        "GITHUB_TOKEN": "${input:github_token}"
+      }
+    }
+  }
+}
